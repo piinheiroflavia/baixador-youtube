@@ -1,0 +1,47 @@
+name: Gerar programa para Windows
+
+# Roda quando o código muda, quando alguém clica em "Run workflow"
+# e toda segunda-feira (para pegar a versão mais nova do yt-dlp,
+# já que o YouTube muda com frequência).
+on:
+  push:
+    branches: [main]
+    paths: ["Baixador_YouTube.pyw", ".github/workflows/gerar-exe.yml"]
+  workflow_dispatch:
+  schedule:
+    - cron: "0 9 * * 1"
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Instalar dependências
+        run: pip install --upgrade pyinstaller yt-dlp imageio-ffmpeg
+
+      - name: Gerar o .exe
+        run: >
+          pyinstaller Baixador_YouTube.pyw
+          --onefile --windowed --noconfirm
+          --name BaixadorYouTube
+          --collect-all imageio_ffmpeg
+          --collect-all yt_dlp
+
+      - name: Publicar na página de downloads
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ultima-versao
+          name: Baixador do YouTube (versão mais recente)
+          body: |
+            Baixe o arquivo **BaixadorYouTube.exe** abaixo e dê dois cliques para abrir.
+            Não precisa instalar nada.
+          files: dist/BaixadorYouTube.exe
+          make_latest: true
