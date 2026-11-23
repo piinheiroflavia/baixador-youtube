@@ -7,6 +7,7 @@ import re
 import subprocess
 import sys
 import threading
+import time
 import tkinter as tk
 from tkinter import filedialog
 
@@ -78,9 +79,36 @@ def recurso(nome):
     return caminho if os.path.exists(caminho) else None
 
 
+def pasta_dados():
+    base = os.environ.get("LOCALAPPDATA") or os.path.join(os.path.expanduser("~"), ".local", "share")
+    p = os.path.join(base, "BaixadorYouTube")
+    os.makedirs(p, exist_ok=True)
+    return p
+
+
+_trava_deno = threading.Lock()
+
+
 def caminho_deno():
-    """Motor de JavaScript que o yt-dlp precisa para o YouTube."""
-    p = recurso("deno.exe" if os.name == "nt" else "deno")
+    """Motor de JavaScript que o yt-dlp precisa para o YouTube.
+    No .exe ele é copiado uma única vez para uma pasta fixa, para o antivírus
+    não precisar examiná-lo de novo toda vez que o programa abre."""
+    nome = "deno.exe" if os.name == "nt" else "deno"
+    p = recurso(nome)
+    if p and getattr(sys, "frozen", False):
+        with _trava_deno:
+            try:
+                destino = os.path.join(pasta_dados(), nome)
+                if not os.path.exists(destino) or os.path.getsize(destino) != os.path.getsize(p):
+                    import shutil
+                    tmp = destino + ".tmp"
+                    shutil.copyfile(p, tmp)
+                    os.replace(tmp, destino)
+                    if os.name != "nt":
+                        os.chmod(destino, 0o755)
+                return destino
+            except Exception:
+                return p
     if p:
         return p
     try:
@@ -129,15 +157,52 @@ def erro_amigavel(e):
     return "Não foi possível baixar este vídeo. Feche o programa, abra de novo e tente mais uma vez."
 
 
-def opcoes_base():
+class Registro:
+    """Guarda o passo a passo do yt-dlp (para descobrir problemas)."""
+
+    def __init__(self, titulo):
+        self.linhas = []
+        self._escrever("INFO", f"===== {titulo} =====")
+
+    def _escrever(self, nivel, msg):
+        linha = f"{time.strftime('%H:%M:%S')} {nivel} {msg}"
+        self.linhas.append(linha)
+        try:
+            with open(os.path.join(pasta_dados(), "registro.txt"), "a", encoding="utf-8") as f:
+                f.write(linha + "\n")
+        except Exception:
+            pass
+
+    def debug(self, msg):
+        self._escrever("DEBUG", msg)
+
+    def info(self, msg):
+        self._escrever("INFO", msg)
+
+    def warning(self, msg):
+        self._escrever("AVISO", msg)
+
+    def error(self, msg):
+        self._escrever("ERRO", msg)
+
+    def resumo(self, erro=None):
+        topo = f"{erro}\n\n" if erro else ""
+        return topo + "\n".join(self.linhas[-80:])
+
+
+def opcoes_base(registro=None):
     import imageio_ffmpeg
     o = {
         "noplaylist": True,
-        "quiet": True,
-        "no_warnings": True,
+        "quiet": registro is None,
+        "no_warnings": registro is None,
+        "noprogress": True,
         "windowsfilenames": True,
         "ffmpeg_location": imageio_ffmpeg.get_ffmpeg_exe(),
+        "socket_timeout": 20,
     }
+    if registro is not None:
+        o.update({"logger": registro, "verbose": True})
     deno = caminho_deno()
     if deno:
         o["js_runtimes"] = {"deno": {"path": deno}}
@@ -277,7 +342,7 @@ class Cartao(tk.Canvas):
     """Caixa com cantos arredondados; o conteúdo vai em .dentro"""
 
     def __init__(self, pai, fundo, cor=BRANCO, borda=BORDA, raio=12, pad=14, espessura=1):
-        super().__init__(pai, bg=fundo, highlightthickness=0, bd=0)
+        super().__init__(pai, bg=fundo, highlightthickness=0, bd=0, width=1, height=1)
         self.cor, self.borda, self.raio, self.esp = cor, borda, px(raio), espessura
         p = pad if isinstance(pad, tuple) else (pad,) * 4
         self.pl, self.pt, self.pr, self.pb = (px(v) for v in p)
@@ -285,21 +350,23 @@ class Cartao(tk.Canvas):
         self.janela = self.create_window(self.pl, self.pt, window=self.dentro, anchor="nw")
         self.dentro.bind("<Configure>", lambda e: self._ajustar())
         self.bind("<Configure>", lambda e: self._desenhar())
+        self.after_idle(self._ajustar)
 
     def _ajustar(self):
-        self.config(height=self.dentro.winfo_reqheight() + self.pt + self.pb)
-        if not self.winfo_ismapped() or self.winfo_width() <= 1:
-            self.config(width=self.dentro.winfo_reqwidth() + self.pl + self.pr)
+        alvo = self.dentro.winfo_reqheight() + self.pt + self.pb
+        if int(self.cget("height")) != alvo:
+            self.config(height=alvo)
 
     def _desenhar(self):
         w, h = self.winfo_width(), self.winfo_height()
+        self.itemconfig(self.janela, width=max(1, w - self.pl - self.pr))
+        self._ajustar()
         self.delete("fundo")
         if w <= 2 or h <= 2:
             return
         self._img = forma_lisa(w, h, self.raio, self.cor, self.borda, self.esp)
         self.create_image(0, 0, image=self._img, anchor="nw", tags="fundo")
         self.tag_lower("fundo")
-        self.itemconfig(self.janela, width=max(1, w - self.pl - self.pr))
 
     def colorir(self, cor=None, borda=None, espessura=None):
         antiga = self.cor
@@ -441,24 +508,27 @@ def passo(pai, numero, texto, fundo=BRANCO):
 
 # ======================= tela principal =======================
 class App:
-    def __init__(self, root):
+    def __init__(self, root, estado=None):
+        e = estado or {}
         self.root = root
-        self.fila = queue.Queue()
+        self.vivo = True
+        self.fila = e.get("fila") or queue.Queue()
         self.baixando = False
-        self.tipo = "video"
-        self.qualidade = 720
-        self.pasta = pasta_padrao()
-        self.info = None
-        self.miniatura_pil = None
-        self.pedido_previa = 0
+        self.tipo = e.get("tipo", "video")
+        self.qualidade = e.get("qualidade", 720)
+        self.pasta = e.get("pasta", pasta_padrao())
+        self.info = e.get("info")
+        self.miniatura_pil = e.get("miniatura_pil")
+        self.pedido_previa = e.get("pedido_previa", 0)
         self.agendado = None
-        self.ultimo_arquivo = None
-        self.detalhes = ""
+        self.ultimo_arquivo = e.get("ultimo_arquivo")
+        self.detalhes = e.get("detalhes", "")
+        self.carregando_desde = e.get("carregando_desde")
+        self.procurando_desde = None
         self.imagens = {}
 
         root.title("Baixar vídeos Youtube")
         root.configure(bg=FUNDO)
-        root.resizable(False, False)
 
         janela = tk.Frame(root, bg=BRANCO)
         janela.pack(fill="both", expand=True)
@@ -477,13 +547,13 @@ class App:
         corpo.pack(fill="both", expand=True)
 
         # ---------- coluna da esquerda ----------
-        esq = tk.Frame(corpo, bg=BRANCO, padx=px(44), pady=px(36), width=px(626))
+        esq = tk.Frame(corpo, bg=BRANCO, padx=px(44), pady=px(36))
         esq.pack(side="left", fill="y")
-        esq.pack_propagate(False)
+        tk.Frame(esq, bg=BRANCO, width=px(538), height=0).pack()  # define a largura da coluna
         tk.Frame(corpo, bg=BORDA, width=1).pack(side="left", fill="y")
-        dir_ = tk.Frame(corpo, bg=PAINEL, padx=px(40), pady=px(36), width=px(490))
+        dir_ = tk.Frame(corpo, bg=PAINEL, padx=px(40), pady=px(36))
         dir_.pack(side="left", fill="both", expand=True)
-        dir_.pack_propagate(False)
+        tk.Frame(dir_, bg=PAINEL, width=px(410), height=0).pack()  # define a largura da coluna
 
         tk.Label(esq, text="Seus vídeos favoritos,\nprontos para baixar.", font=fonte(38, True), bg=BRANCO,
                  fg=TEXTO, justify="left").pack(anchor="w")
@@ -551,7 +621,7 @@ class App:
         alterar.bind("<Button-1>", lambda e: self.trocar_pasta())
 
         self.status = tk.Label(esq, text="", font=fonte(13), bg=BRANCO, fg=TEXTO_2, wraplength=px(530),
-                               justify="left")
+                               justify="left", height=2, anchor="nw")
         self.status.pack(anchor="w", pady=(px(12), 0))
         self.link_detalhes = tk.Label(esq, text="copiar detalhes do erro", font=fonte(12) + ("underline",),
                                       bg=BRANCO, fg=AZUL, cursor="hand2")
@@ -566,6 +636,7 @@ class App:
         self.mini_w, self.mini_h = px(408), px(230)
         self.mini = tk.Canvas(cd, width=self.mini_w, height=self.mini_h, bg=PAINEL, highlightthickness=0)
         self.mini.pack(fill="x")
+        self.mini.bind("<Configure>", self._mini_largura)
         info = tk.Frame(cd, bg=BRANCO, padx=px(19), pady=px(18))
         info.pack(fill="x")
         self.rot_titulo = tk.Label(info, text="", font=fonte(16, True), bg=BRANCO, fg=TEXTO, anchor="w",
@@ -615,19 +686,46 @@ class App:
         rod.pack(fill="x")
         tk.Label(rod, text="Baixe apenas conteúdos que você tem permissão para usar.", font=fonte(11),
                  bg=FUNDO, fg=TEXTO_2).pack(side="left")
-        tk.Label(rod, text="© Ana Pinheiro. Todos os direitos reservados.", font=fonte(11), bg=FUNDO,
+        tk.Label(rod, text="© Desenvolvido por Ana Flavia Pinheiro", font=fonte(11), bg=FUNDO,
                  fg=TEXTO_2).pack(side="right")
 
         # estado inicial
-        root.geometry(f"{px(1118)}x{px(744)}")
-        self.escolher("video")
+        if e.get("link"):
+            self.entrada.insert(0, e["link"])
+        self.escolher(self.tipo)
         self.atualizar_pasta()
-        self.mostrar_previa()
-        root.bind("<FocusIn>", lambda e: self.colar_automatico())
-        root.bind("<Return>", lambda e: self.iniciar())
+        self.mostrar_previa(carregando=bool(self.carregando_desde))
+        if e.get("link"):
+            self.validar_link()
+        root.bind("<FocusIn>", lambda ev: self.colar_automatico())
+        root.bind("<Return>", lambda ev: self.iniciar())
         root.after(100, self.ler_fila)
-        root.after(300, self.colar_automatico)
-        self.centralizar()
+        root.after(1000, self.tique)
+        if not estado:
+            root.after(300, self.colar_automatico)
+
+    def estado(self):
+        return {"fila": self.fila, "link": self.entrada.get().strip(), "tipo": self.tipo,
+                "qualidade": self.qualidade, "pasta": self.pasta, "info": self.info,
+                "miniatura_pil": self.miniatura_pil, "pedido_previa": self.pedido_previa,
+                "ultimo_arquivo": self.ultimo_arquivo, "detalhes": self.detalhes,
+                "carregando_desde": self.carregando_desde}
+
+    def tique(self):
+        """Mostra o tempo passando, para a pessoa ver que o programa não travou."""
+        if not self.vivo:
+            return
+        agora = time.time()
+        if self.carregando_desde:
+            seg = int(agora - self.carregando_desde)
+            extra = "  (na primeira vez pode levar até 1 minuto)" if seg >= 15 else ""
+            self.rot_site.config(text=f"Buscando informações no YouTube… {seg} s{extra}")
+        if self.procurando_desde:
+            seg = int(agora - self.procurando_desde)
+            self.botao.mudar(texto=f"Procurando… {seg} s")
+            if seg >= 20:
+                self.mostrar_status("Está demorando mais que o normal. Na primeira vez pode levar até 1 minuto.")
+        self.root.after(1000, self.tique)
 
     # ---------- partes da tela ----------
     def opcao(self, pai, desenho, titulo, sub, tipo):
@@ -661,6 +759,11 @@ class App:
             r.create_oval(px(5), px(5), n - px(6), n - px(6), fill=AMARELO, outline=AMARELO)
         else:
             r.create_oval(1, 1, n - 2, n - 2, outline="#B9BCC4", width=max(1, px(1.2)))
+
+    def _mini_largura(self, ev):
+        if abs(ev.width - self.mini_w) > 2:
+            self.mini_w = ev.width
+            self.mostrar_previa(carregando=bool(self.carregando_desde))
 
     def mostrar_previa(self, carregando=False):
         c = self.mini
@@ -738,6 +841,8 @@ class App:
         self.validar_link()
 
     def colar_automatico(self):
+        if not self.vivo:
+            return False
         if self.entrada.get().strip() or self.baixando:
             return
         try:
@@ -749,6 +854,8 @@ class App:
             self.validar_link()
 
     def validar_link(self):
+        if not self.vivo:
+            return False
         texto = self.entrada.get().strip()
         if not texto:
             self.aviso_link.config(text="")
@@ -772,17 +879,21 @@ class App:
         self.agendado = self.root.after(600, lambda: self.buscar_previa(url))
 
     def buscar_previa(self, url):
+        if not self.vivo:
+            return False
         self.agendado = None
         self.pedido_previa += 1
         n = self.pedido_previa
         self.info, self.miniatura_pil = None, None
+        self.carregando_desde = time.time()
         self.mostrar_previa(carregando=True)
         threading.Thread(target=self._previa, args=(url, n), daemon=True).start()
 
     def _previa(self, url, n):
+        reg = Registro(f"prévia {url}")
         try:
             import yt_dlp
-            with yt_dlp.YoutubeDL(opcoes_base()) as ydl:
+            with yt_dlp.YoutubeDL(opcoes_base(reg)) as ydl:
                 info = ydl.extract_info(url, download=False)
             info["_link"] = url
             img = None
@@ -793,7 +904,7 @@ class App:
                     img = None
             self.fila.put(("previa", (n, info, img)))
         except Exception as e:
-            self.fila.put(("previa_erro", (n, e)))
+            self.fila.put(("previa_erro", (n, e, reg.resumo(e))))
 
     # ---------- passos 2 e 3 ----------
     def escolher(self, tipo):
@@ -854,6 +965,7 @@ class App:
         self.link_detalhes.pack_forget()
         self.mostrar_status("")
         self.botao.mudar(texto="Procurando…", ativo=False, pct=0)
+        self.procurando_desde = time.time()
         os.makedirs(self.pasta, exist_ok=True)
         threading.Thread(target=self.baixar, daemon=True,
                          args=(self.entrada.get().strip(), self.tipo, self.qualidade, self.pasta)).start()
@@ -879,7 +991,8 @@ class App:
             elif d["status"] == "finished":
                 self.fila.put(("finalizando", None))
 
-        opcoes = opcoes_base()
+        reg = Registro(f"download {tipo} {q} {url}")
+        opcoes = opcoes_base(reg)
         opcoes.update({"outtmpl": os.path.join(pasta, "%(title)s.%(ext)s"), "progress_hooks": [gancho]})
         if tipo == "video":
             opcoes.update({"format": formato_video(q), "merge_output_format": "mp4"})
@@ -899,30 +1012,39 @@ class App:
                 arquivo = None
             self.fila.put(("sucesso", (info.get("title") or "Seu vídeo", arquivo)))
         except Exception as e:
-            self.fila.put(("erro", (erro_amigavel(e), str(e))))
+            self.fila.put(("erro", (erro_amigavel(e), reg.resumo(e))))
 
     # ---------- mensagens do segundo plano ----------
     def ler_fila(self):
+        if not self.vivo:
+            return
         try:
             while True:
                 tipo, valor = self.fila.get_nowait()
                 if tipo == "progresso":
+                    self.procurando_desde = None
                     self.botao.mudar(texto=f"Baixando… {valor:.0f}%", pct=valor)
                 elif tipo == "finalizando":
+                    self.procurando_desde = None
                     self.botao.mudar(texto="Finalizando…", pct=99)
                 elif tipo == "previa":
                     n, info, img = valor
                     if n == self.pedido_previa:
+                        self.carregando_desde = None
                         self.info, self.miniatura_pil = info, img
                         self.escolher(self.tipo)
                         self.mostrar_previa()
                 elif tipo == "previa_erro":
-                    n, e = valor
+                    n, e, det = valor
                     if n == self.pedido_previa:
+                        self.carregando_desde = None
                         self.info = None
                         self.mostrar_previa()
                         self.rot_titulo.config(text="Não deu para carregar a prévia", fg=TEXTO_2)
                         self.rot_site.config(text=erro_amigavel(e))
+                        self.detalhes = det
+                        self.link_detalhes.config(text="copiar detalhes do erro")
+                        self.link_detalhes.pack(anchor="w", pady=(px(2), 0))
                 elif tipo == "sucesso":
                     titulo, arquivo = valor
                     self.ultimo_arquivo = arquivo
@@ -944,14 +1066,70 @@ class App:
 
     def fim(self):
         self.baixando = False
+        self.procurando_desde = None
         self.botao.mudar(texto="Baixar agora", ativo=True, pct=None)
 
 
 # ======================= abertura =======================
-def iniciar_app(raiz):
-    for w in raiz.winfo_children():
-        w.destroy()
-    App(raiz)
+class Controle:
+    """Monta a tela e ajusta o tamanho dela ao da janela (e da tela do computador)."""
+
+    def __init__(self, raiz):
+        self.raiz = raiz
+        self.app = None
+        self.nat = (1, 1)
+        self.agendado = None
+        raiz.bind("<Configure>", self.ao_mudar, add="+")
+
+    def montar(self, estado=None, tamanho=None):
+        if self.app:
+            self.app.vivo = False
+        for w in self.raiz.winfo_children():
+            w.destroy()
+        self.app = App(self.raiz, estado)
+        self.raiz.update_idletasks()
+        self.nat = (self.raiz.winfo_reqwidth(), self.raiz.winfo_reqheight())
+        self.raiz.minsize(min(self.nat[0], px(700)), min(self.nat[1], px(480)))
+        if tamanho:
+            self.raiz.geometry(f"{tamanho[0]}x{tamanho[1]}")
+
+    def caber_na_tela(self):
+        """Na abertura, diminui tudo se a tela do computador for pequena."""
+        global S
+        livre_w = self.raiz.winfo_screenwidth() - px(30)
+        livre_h = self.raiz.winfo_screenheight() - px(90)  # barra de tarefas e título
+        r = min(1.0, livre_w / self.nat[0], livre_h / self.nat[1])
+        if r < 0.98:
+            S = max(0.55, S * r)
+            self.montar(self.app.estado())
+        w, h = self.nat
+        x = max(0, (self.raiz.winfo_screenwidth() - w) // 2)
+        y = max(0, (self.raiz.winfo_screenheight() - px(60) - h) // 2)
+        self.raiz.geometry(f"{w}x{h}+{x}+{y}")
+
+    def ao_mudar(self, ev):
+        if ev.widget is not self.raiz or not self.app:
+            return
+        if self.agendado:
+            self.raiz.after_cancel(self.agendado)
+        self.agendado = self.raiz.after(350, self.verificar)
+
+    def verificar(self):
+        """Quando a pessoa aumenta, diminui ou maximiza a janela, refaz a tela no novo tamanho."""
+        global S
+        self.agendado = None
+        if self.app.baixando:
+            self.agendado = self.raiz.after(1500, self.verificar)
+            return
+        w, h = self.raiz.winfo_width(), self.raiz.winfo_height()
+        r = min(w / self.nat[0], h / self.nat[1])
+        if abs(r - 1) < 0.04:
+            return
+        novo = max(0.55, min(3.0, S * r))
+        if abs(novo - S) < 0.01:
+            return
+        S = novo
+        self.montar(self.app.estado(), (w, h))
 
 
 def main():
@@ -965,6 +1143,7 @@ def main():
     raiz = tk.Tk()
     S = max(1.0, raiz.winfo_fpixels("1i") / 96)
     raiz.title("Baixar vídeos Youtube")
+    raiz.resizable(True, True)
     ico = recurso("icone.ico")
     if ico and os.name == "nt":
         try:
@@ -977,8 +1156,14 @@ def main():
         except Exception:
             pass
 
+    def abrir_principal():
+        threading.Thread(target=caminho_deno, daemon=True).start()  # prepara o motor do YouTube
+        ctrl = Controle(raiz)
+        ctrl.montar()
+        ctrl.caber_na_tela()
+
     if getattr(sys, "frozen", False):  # .exe já vem com tudo dentro
-        iniciar_app(raiz)
+        abrir_principal()
     else:
         # tela de espera enquanto instala/atualiza os componentes
         raiz.configure(bg=BRANCO)
@@ -1007,9 +1192,10 @@ def main():
             try:
                 import PIL  # noqa: F401
                 import yt_dlp  # noqa: F401
-                iniciar_app(raiz)
             except ImportError:
                 aviso.config(text="Não consegui preparar. Verifique a internet e abra de novo.", fg=VERMELHO)
+                return
+            abrir_principal()
 
         esperar()
     raiz.mainloop()
