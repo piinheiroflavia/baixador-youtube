@@ -28,7 +28,7 @@ CINZA_BOTAO = "#C5CBD6"
 
 FONTE = "Segoe UI" if os.name == "nt" else ("Helvetica" if sys.platform == "darwin" else "DejaVu Sans")
 
-DEPENDENCIAS = ["yt-dlp", "imageio-ffmpeg"]
+DEPENDENCIAS = ["yt-dlp[default]", "imageio-ffmpeg", "deno"]
 PADRAO_LINK = re.compile(r"(youtube\.com/|youtu\.be/)", re.I)
 
 FORMATO_VIDEO = {
@@ -72,14 +72,40 @@ def abrir(caminho):
         pass
 
 
+def recurso(nome):
+    """Arquivo que vem junto com o programa (dentro do .exe ou ao lado do .pyw)."""
+    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    caminho = os.path.join(base, nome)
+    return caminho if os.path.exists(caminho) else None
+
+
+def caminho_deno():
+    """Motor de JavaScript que o yt-dlp precisa para o YouTube."""
+    p = recurso("deno.exe" if os.name == "nt" else "deno")
+    if p:
+        return p
+    try:
+        import deno
+        return deno.find_deno_bin()
+    except Exception:
+        import shutil
+        return shutil.which("deno")
+
+
 def erro_amigavel(e):
     msg = str(e).lower()
-    if "private" in msg:
+    if "private video" in msg:
         return "Esse vídeo é privado. Só quem é dono pode ver."
-    if "unavailable" in msg or "not available" in msg or "removed" in msg:
+    if "confirm your age" in msg or "age-restricted" in msg or "inappropriate for some users" in msg:
+        return "Esse vídeo tem restrição de idade e pede login. Não dá para baixar."
+    if "not a bot" in msg or "confirm you" in msg:
+        return "O YouTube pediu uma verificação. Espere alguns minutos e tente de novo."
+    if "video unavailable" in msg or "has been removed" in msg or "no longer available" in msg:
         return "Esse vídeo não está disponível. Ele pode ter sido apagado."
-    if "sign in" in msg or "age" in msg:
-        return "Esse vídeo pede login (por exemplo, por ter restrição de idade). Não dá para baixar."
+    if "members-only" in msg or "join this channel" in msg:
+        return "Esse vídeo é só para membros do canal. Não dá para baixar."
+    if "live event" in msg or "is live" in msg or "premieres in" in msg:
+        return "Esse vídeo é uma transmissão ao vivo que ainda não terminou. Tente depois."
     if "unsupported url" in msg or "is not a valid url" in msg:
         return "Esse link não parece ser de um vídeo do YouTube. Confira e tente de novo."
     if any(p in msg for p in ("getaddrinfo", "connection", "timed out", "network", "resolve")):
@@ -205,6 +231,10 @@ class App:
         self.status = tk.Label(self.area, text="", font=(FONTE, 11), bg=FUNDO, fg=TEXTO_2,
                                wraplength=520, justify="left")
         self.status.pack(anchor="w", pady=(6, 0))
+        self.detalhes = ""
+        self.link_detalhes = tk.Label(self.area, text="copiar detalhes do erro", font=(FONTE, 9, "underline"),
+                                      bg=FUNDO, fg=AZUL, cursor="hand2")
+        self.link_detalhes.bind("<Button-1>", lambda e: self.copiar_detalhes())
 
         self.resultado = tk.Frame(geral, bg=VERDE_CLARO, padx=16, pady=12)
         self.res_texto = tk.Label(self.resultado, text="", font=(FONTE, 12, "bold"), bg=VERDE_CLARO,
@@ -256,6 +286,11 @@ class App:
 
     def mostrar_status(self, texto, cor=TEXTO_2):
         self.status.config(text=texto, fg=cor)
+
+    def copiar_detalhes(self):
+        self.root.clipboard_clear()
+        self.root.clipboard_append(self.detalhes)
+        self.link_detalhes.config(text="✓ copiado — cole numa mensagem para quem te ajuda")
 
     def progresso(self, pct):
         largura = self.barra.winfo_width()
@@ -327,6 +362,7 @@ class App:
         self.botao.ligar(False)
         self.botao.config(text="Baixando…")
         self.resultado.pack_forget()
+        self.link_detalhes.pack_forget()
         self.progresso(0)
         os.makedirs(self.pasta, exist_ok=True)
         threading.Thread(target=self.baixar, args=(self.entrada.get().strip(), self.tipo, self.pasta),
@@ -371,6 +407,9 @@ class App:
             "no_warnings": True,
             "windowsfilenames": True,
         }
+        deno = caminho_deno()
+        if deno:
+            opcoes["js_runtimes"] = {"deno": {"path": deno}}
         opcoes.update(FORMATO_VIDEO if tipo == "video" else FORMATO_AUDIO)
 
         try:
@@ -387,7 +426,7 @@ class App:
                 arquivo = None
             self.fila.put(("sucesso", (info.get("title") or "Seu vídeo", arquivo)))
         except Exception as e:
-            self.fila.put(("erro", erro_amigavel(e)))
+            self.fila.put(("erro", (erro_amigavel(e), str(e))))
 
     def ler_fila(self):
         try:
@@ -416,7 +455,11 @@ class App:
                     self.fim()
                 elif tipo == "erro":
                     self.progresso(0)
-                    self.mostrar_status("✗  " + valor, VERMELHO)
+                    amigavel, tecnico = valor
+                    self.mostrar_status("✗  " + amigavel, VERMELHO)
+                    self.detalhes = tecnico
+                    self.link_detalhes.config(text="copiar detalhes do erro")
+                    self.link_detalhes.pack(anchor="w", pady=(2, 0))
                     self.fim()
         except queue.Empty:
             pass
@@ -436,5 +479,16 @@ if __name__ == "__main__":
         except Exception:
             pass
     raiz = tk.Tk()
+    icone = recurso("icone.ico")
+    if icone and os.name == "nt":
+        try:
+            raiz.iconbitmap(default=icone)
+        except Exception:
+            pass
+    elif recurso("icone.png"):
+        try:
+            raiz.iconphoto(True, tk.PhotoImage(file=recurso("icone.png")))
+        except Exception:
+            pass
     App(raiz)
     raiz.mainloop()

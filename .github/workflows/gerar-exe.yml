@@ -6,7 +6,7 @@ name: Gerar programa para Windows
 on:
   push:
     branches: [main]
-    paths: ["Baixador_YouTube.pyw", ".github/workflows/gerar-exe.yml"]
+    paths: ["Baixador_YouTube.pyw", "icone.ico", ".github/workflows/gerar-exe.yml"]
   workflow_dispatch:
   schedule:
     - cron: "0 9 * * 1"
@@ -25,20 +25,26 @@ jobs:
           python-version: "3.12"
 
       - name: Instalar dependências
-        run: pip install --upgrade pyinstaller yt-dlp imageio-ffmpeg
+        run: pip install --upgrade pyinstaller "yt-dlp[default]" imageio-ffmpeg deno
 
       - name: Gerar o .exe
-        run: >
-          pyinstaller Baixador_YouTube.pyw
-          --onefile --windowed --noconfirm
-          --name BaixadorYouTube
-          --collect-all imageio_ffmpeg
-          --collect-all yt_dlp
+        run: |
+          $deno = python -c "import deno; print(deno.find_deno_bin())"
+          Write-Host "Deno: $deno"
+          pyinstaller Baixador_YouTube.pyw `
+            --onefile --windowed --noconfirm `
+            --name BaixadorYouTube `
+            --icon icone.ico `
+            --add-data "icone.ico;." `
+            --add-binary "$deno;." `
+            --collect-all imageio_ffmpeg `
+            --collect-all yt_dlp `
+            --collect-all yt_dlp_ejs
 
       - name: Publicar na página de downloads
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ultima-versao
+          tag_name: baixador
           name: Baixador do YouTube (versão mais recente)
           body: |
             Baixe o arquivo **BaixadorYouTube.exe** abaixo e dê dois cliques para abrir.
