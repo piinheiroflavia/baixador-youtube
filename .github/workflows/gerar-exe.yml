@@ -25,7 +25,7 @@ jobs:
           python-version: "3.12"
 
       - name: Instalar dependências
-        run: pip install --upgrade pyinstaller "yt-dlp[default]" imageio-ffmpeg deno pillow
+        run: pip install --upgrade pyinstaller "yt-dlp[default]" imageio-ffmpeg deno pillow pypac
 
       - name: Gerar o .exe
         run: |
@@ -42,7 +42,10 @@ jobs:
             --add-binary "$deno;." `
             --collect-all imageio_ffmpeg `
             --collect-all yt_dlp `
-            --collect-all yt_dlp_ejs
+            --collect-all yt_dlp_ejs `
+            --collect-all pypac `
+            --collect-all dukpy `
+            --collect-all publicsuffixlist
 
       - name: Publicar na página de downloads
         uses: softprops/action-gh-release@v2

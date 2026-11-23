@@ -55,7 +55,7 @@ def fonte(tam, negrito=False):
 
 
 # ======================= dependências e arquivos =======================
-DEPENDENCIAS = ["yt-dlp[default]", "imageio-ffmpeg", "deno", "pillow"]
+DEPENDENCIAS = ["yt-dlp[default]", "imageio-ffmpeg", "deno", "pillow", "pypac"]
 PADRAO_LINK = re.compile(r"(youtube\.com/|youtu\.be/)", re.I)
 
 QUALIDADES_VIDEO = [(1080, "1080p — Alta qualidade"), (720, "720p — Recomendado"),
@@ -153,8 +153,123 @@ def erro_amigavel(e):
     if "unsupported url" in msg or "is not a valid url" in msg:
         return "Esse link não parece ser de um vídeo do YouTube. Confira e tente de novo."
     if any(p in msg for p in ("getaddrinfo", "connection", "timed out", "network", "resolve")):
+        if "resolve" in msg or "getaddrinfo" in msg:
+            return ("Não foi possível chegar ao YouTube por esta rede. Se for um computador do trabalho, "
+                    "a rede pode estar bloqueando. Tente em outra rede (ex.: roteador do celular).")
         return "Parece que a internet caiu. Verifique a conexão e tente de novo."
     return "Não foi possível baixar este vídeo. Feche o programa, abra de novo e tente mais uma vez."
+
+
+def anotar(msg):
+    """Escreve uma linha no arquivo de registro."""
+    try:
+        with open(os.path.join(pasta_dados(), "registro.txt"), "a", encoding="utf-8") as f:
+            f.write(f"{time.strftime('%H:%M:%S')} REDE {msg}\n")
+    except Exception:
+        pass
+
+
+# ======================= rede (proxy e DNS) =======================
+# Em computadores de empresa o navegador costuma sair para a internet por um
+# proxy automático (script PAC) ou usar "DNS seguro". O programa faz o mesmo.
+REDE = {"proxy": None, "pronto": threading.Event()}
+
+
+def descobrir_proxy():
+    proxy = None
+    try:
+        import pypac
+        pac = pypac.get_pac(timeout=5)
+        if pac:
+            resposta = pac.find_proxy_for_url("https://www.youtube.com/", "www.youtube.com") or ""
+            anotar(f"script PAC encontrado: {resposta}")
+            for parte in resposta.split(";"):
+                parte = parte.strip()
+                tipo, _, end = parte.partition(" ")
+                if tipo.upper() in ("PROXY", "HTTP", "HTTPS") and end.strip():
+                    proxy = "http://" + end.strip()
+                    break
+                if tipo.upper() in ("SOCKS", "SOCKS5") and end.strip():
+                    proxy = "socks5://" + end.strip()
+                    break
+                if tipo.upper() == "DIRECT":
+                    break
+        else:
+            anotar("nenhum script PAC configurado")
+    except Exception as e:
+        anotar(f"não deu para ler o script PAC: {e}")
+    if not proxy:
+        try:
+            import urllib.request
+            pr = urllib.request.getproxies()
+            proxy = pr.get("https") or pr.get("http")
+            if proxy:
+                anotar(f"proxy do Windows: {proxy}")
+        except Exception:
+            pass
+    REDE["proxy"] = proxy
+    anotar(f"proxy em uso: {proxy or 'nenhum (conexão direta)'}")
+    REDE["pronto"].set()
+
+
+_dns_guardado = {}
+
+
+def _dns_seguro(host):
+    """Consulta o endereço por DNS sobre HTTPS (como o 'DNS seguro' do navegador)."""
+    import json
+    import urllib.request
+    abridor = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    for url in (f"https://1.1.1.1/dns-query?name={host}&type=A",
+                f"https://8.8.8.8/resolve?name={host}&type=A"):
+        try:
+            req = urllib.request.Request(url, headers={"accept": "application/dns-json"})
+            with abridor.open(req, timeout=8) as r:
+                dados = json.load(r)
+            ips = [a["data"] for a in dados.get("Answer", []) if a.get("type") == 1]
+            if ips:
+                return ips
+        except Exception as e:
+            anotar(f"DNS seguro falhou em {url.split('/')[2]}: {e}")
+    return []
+
+
+def ativar_dns_reserva():
+    """Se o DNS do computador não achar um endereço, tenta pelo DNS seguro."""
+    import ipaddress
+    import socket
+    original = socket.getaddrinfo
+
+    def getaddrinfo(host, port, *args, **kwargs):
+        try:
+            return original(host, port, *args, **kwargs)
+        except socket.gaierror:
+            if not host:
+                raise
+            nome = host.decode() if isinstance(host, bytes) else str(host)
+            try:
+                ipaddress.ip_address(nome)
+                raise
+            except ValueError:
+                pass
+            ips = _dns_guardado.get(nome)
+            if ips is None:
+                ips = _dns_seguro(nome)
+                _dns_guardado[nome] = ips
+                anotar(f"DNS do computador não achou {nome}; DNS seguro: {ips or 'também não achou'}")
+            if not ips:
+                raise
+            resultado = []
+            for ip in ips:
+                try:
+                    resultado += original(ip, port, *args, **kwargs)
+                except socket.gaierror:
+                    pass
+            if not resultado:
+                raise
+            return resultado
+
+    socket.getaddrinfo = getaddrinfo
 
 
 class Registro:
@@ -203,6 +318,9 @@ def opcoes_base(registro=None):
     }
     if registro is not None:
         o.update({"logger": registro, "verbose": True})
+    REDE["pronto"].wait(12)
+    if REDE["proxy"]:
+        o["proxy"] = REDE["proxy"]
     deno = caminho_deno()
     if deno:
         o["js_runtimes"] = {"deno": {"path": deno}}
@@ -284,7 +402,9 @@ def baixar_miniatura(url):
     import urllib.request
     from PIL import Image
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    with urllib.request.urlopen(req, timeout=10) as r:
+    pr = REDE["proxy"]
+    abridor = urllib.request.build_opener(urllib.request.ProxyHandler({"http": pr, "https": pr} if pr else {}))
+    with abridor.open(req, timeout=10) as r:
         return Image.open(io.BytesIO(r.read()))
 
 
@@ -1157,6 +1277,8 @@ def main():
             pass
 
     def abrir_principal():
+        ativar_dns_reserva()
+        threading.Thread(target=descobrir_proxy, daemon=True).start()  # caminho da internet
         threading.Thread(target=caminho_deno, daemon=True).start()  # prepara o motor do YouTube
         ctrl = Controle(raiz)
         ctrl.montar()
