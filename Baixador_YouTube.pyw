@@ -50,8 +50,12 @@ def px(v):
     return int(round(v * S))
 
 
+LETRA_MINIMA = 12  # px: abaixo disso o texto fica difícil de ler
+
+
 def fonte(tam, negrito=False):
-    return (FB if negrito else F, -px(tam), "bold" if (negrito and FB == F) else "normal")
+    tamanho = max(px(tam), min(tam, LETRA_MINIMA))
+    return (FB if negrito else F, -tamanho, "bold" if (negrito and FB == F) else "normal")
 
 
 # ======================= dependências e arquivos =======================
@@ -804,9 +808,9 @@ class App:
         # ---------- rodapé ----------
         rod = tk.Frame(root, bg=FUNDO, padx=px(16), pady=px(8))
         rod.pack(fill="x")
-        tk.Label(rod, text="Baixe apenas conteúdos que você tem permissão para usar.", font=fonte(11),
+        tk.Label(rod, text="Baixe apenas conteúdos que você tem permissão para usar.", font=fonte(12),
                  bg=FUNDO, fg=TEXTO_2).pack(side="left")
-        tk.Label(rod, text="© Desenvolvido por Ana Flavia Pinheiro", font=fonte(11), bg=FUNDO,
+        tk.Label(rod, text="© Desenvolvido por Ana Flavia Pinheiro", font=fonte(12), bg=FUNDO,
                  fg=TEXTO_2).pack(side="right")
 
         # estado inicial
@@ -1199,6 +1203,7 @@ class Controle:
         self.app = None
         self.nat = (1, 1)
         self.agendado = None
+        self.s_min = 0.8
         raiz.bind("<Configure>", self.ao_mudar, add="+")
 
     def montar(self, estado=None, tamanho=None):
@@ -1209,9 +1214,10 @@ class Controle:
         self.app = App(self.raiz, estado)
         self.raiz.update_idletasks()
         self.nat = (self.raiz.winfo_reqwidth(), self.raiz.winfo_reqheight())
-        self.raiz.minsize(min(self.nat[0], px(700)), min(self.nat[1], px(480)))
-        if tamanho:
-            self.raiz.geometry(f"{tamanho[0]}x{tamanho[1]}")
+        k = self.s_min / S  # tamanho da tela na menor escala permitida
+        self.raiz.minsize(int(self.nat[0] * k), int(self.nat[1] * k))
+        if tamanho:  # nunca menor que o conteúdo, para nada ficar cortado
+            self.raiz.geometry(f"{max(tamanho[0], self.nat[0])}x{max(tamanho[1], self.nat[1])}")
 
     def caber_na_tela(self):
         """Na abertura, diminui tudo se a tela do computador for pequena."""
@@ -1220,8 +1226,11 @@ class Controle:
         livre_h = self.raiz.winfo_screenheight() - px(90)  # barra de tarefas e título
         r = min(1.0, livre_w / self.nat[0], livre_h / self.nat[1])
         if r < 0.98:
-            S = max(0.55, S * r)
+            S = max(0.7, S * r)
+            self.s_min = min(S, 0.8)
             self.montar(self.app.estado())
+        else:
+            self.s_min = min(S, 0.85)
         w, h = self.nat
         x = max(0, (self.raiz.winfo_screenwidth() - w) // 2)
         y = max(0, (self.raiz.winfo_screenheight() - px(60) - h) // 2)
@@ -1245,7 +1254,7 @@ class Controle:
         r = min(w / self.nat[0], h / self.nat[1])
         if abs(r - 1) < 0.04:
             return
-        novo = max(0.55, min(3.0, S * r))
+        novo = max(self.s_min, min(3.0, S * r))
         if abs(novo - S) < 0.01:
             return
         S = novo
