@@ -654,8 +654,24 @@ class App:
         root.title("Baixar vídeos Youtube")
         root.configure(bg=FUNDO)
 
-        janela = tk.Frame(root, bg=BRANCO)
-        janela.pack(fill="both", expand=True)
+        # rodapé fixo embaixo + área com rolagem para o resto
+        self.rod_area = tk.Frame(root, bg=FUNDO)
+        self.rod_area.pack(side="bottom", fill="x")
+        area = tk.Frame(root, bg=BRANCO)
+        area.pack(fill="both", expand=True)
+        self.barra_rolagem = tk.Scrollbar(area, orient="vertical")
+        self.tela = tk.Canvas(area, bg=BRANCO, highlightthickness=0, bd=0,
+                              yscrollcommand=self.barra_rolagem.set)
+        self.barra_rolagem.config(command=self.tela.yview)
+        self.tela.pack(side="left", fill="both", expand=True)
+        janela = tk.Frame(self.tela, bg=BRANCO)
+        self.janela = janela
+        self.janela_id = self.tela.create_window(0, 0, window=janela, anchor="nw")
+        janela.bind("<Configure>", lambda ev: self._ajustar_rolagem())
+        self.tela.bind("<Configure>", lambda ev: self._ajustar_rolagem())
+        root.bind_all("<MouseWheel>", self._rodinha)
+        root.bind_all("<Button-4>", lambda ev: self._rodinha(ev, -1))
+        root.bind_all("<Button-5>", lambda ev: self._rodinha(ev, 1))
 
         # ---------- cabeçalho ----------
         cab = tk.Frame(janela, bg=BRANCO, padx=px(32), pady=px(12))
@@ -806,7 +822,7 @@ class App:
                  fg=TEXTO_2).pack(anchor="w")
 
         # ---------- rodapé ----------
-        rod = tk.Frame(root, bg=FUNDO, padx=px(16), pady=px(8))
+        rod = tk.Frame(self.rod_area, bg=FUNDO, padx=px(16), pady=px(8))
         rod.pack(fill="x")
         tk.Label(rod, text="Baixe apenas conteúdos que você tem permissão para usar.", font=fonte(12),
                  bg=FUNDO, fg=TEXTO_2).pack(side="left")
@@ -827,6 +843,35 @@ class App:
         root.after(1000, self.tique)
         if not estado:
             root.after(300, self.colar_automatico)
+
+    def _ajustar_rolagem(self):
+        if not self.vivo:
+            return
+        w, h = self.tela.winfo_width(), self.tela.winfo_height()
+        if w <= 1 or h <= 1:
+            return
+        alto = self.janela.winfo_reqheight()
+        self.tela.itemconfig(self.janela_id, width=w, height=max(alto, h))
+        self.tela.config(scrollregion=(0, 0, w, max(alto, h)))
+        precisa = alto > h + 2
+        visivel = bool(self.barra_rolagem.winfo_ismapped())
+        if precisa and not visivel:
+            self.barra_rolagem.pack(side="right", fill="y", before=self.tela)
+        elif not precisa and visivel:
+            self.barra_rolagem.pack_forget()
+            self.tela.yview_moveto(0)
+
+    def _rodinha(self, ev, passos=None):
+        if not self.vivo or not self.barra_rolagem.winfo_ismapped():
+            return
+        if passos is None:
+            passos = -1 if ev.delta > 0 else 1
+        self.tela.yview_scroll(passos * 3, "units")
+
+    def tamanho_natural(self):
+        self.root.update_idletasks()
+        return (self.janela.winfo_reqwidth(),
+                self.janela.winfo_reqheight() + self.rod_area.winfo_reqheight())
 
     def estado(self):
         return {"fila": self.fila, "link": self.entrada.get().strip(), "tipo": self.tipo,
@@ -1212,26 +1257,27 @@ class Controle:
         for w in self.raiz.winfo_children():
             w.destroy()
         self.app = App(self.raiz, estado)
-        self.raiz.update_idletasks()
-        self.nat = (self.raiz.winfo_reqwidth(), self.raiz.winfo_reqheight())
-        k = self.s_min / S  # tamanho da tela na menor escala permitida
-        self.raiz.minsize(int(self.nat[0] * k), int(self.nat[1] * k))
-        if tamanho:  # nunca menor que o conteúdo, para nada ficar cortado
-            self.raiz.geometry(f"{max(tamanho[0], self.nat[0])}x{max(tamanho[1], self.nat[1])}")
+        self.nat = self.app.tamanho_natural()
+        self.app.tela.config(width=self.nat[0], height=self.nat[1] - self.app.rod_area.winfo_reqheight())
+        k = self.s_min / S  # largura na menor escala permitida
+        self.raiz.minsize(int(self.nat[0] * k), px(320))
+        if tamanho:  # a largura nunca fica menor que o conteúdo; a altura usa a rolagem
+            self.raiz.geometry(f"{max(tamanho[0], self.nat[0])}x{tamanho[1]}")
 
     def caber_na_tela(self):
         """Na abertura, diminui tudo se a tela do computador for pequena."""
         global S
         livre_w = self.raiz.winfo_screenwidth() - px(30)
         livre_h = self.raiz.winfo_screenheight() - px(90)  # barra de tarefas e título
-        r = min(1.0, livre_w / self.nat[0], livre_h / self.nat[1])
-        if r < 0.98:
-            S = max(0.7, S * r)
+        self.s_min = min(S, 0.85)
+        for _ in range(2):
+            r = min(1.0, livre_w / self.nat[0], livre_h / self.nat[1])
+            if r >= 0.99:
+                break
+            S = max(0.7, S * r * 0.99)
             self.s_min = min(S, 0.8)
             self.montar(self.app.estado())
-        else:
-            self.s_min = min(S, 0.85)
-        w, h = self.nat
+        w, h = self.nat[0], min(self.nat[1], livre_h)
         x = max(0, (self.raiz.winfo_screenwidth() - w) // 2)
         y = max(0, (self.raiz.winfo_screenheight() - px(60) - h) // 2)
         self.raiz.geometry(f"{w}x{h}+{x}+{y}")
@@ -1251,6 +1297,7 @@ class Controle:
             self.agendado = self.raiz.after(1500, self.verificar)
             return
         w, h = self.raiz.winfo_width(), self.raiz.winfo_height()
+        # cresce/diminui até caber; abaixo do tamanho mínimo de letra, aparece a rolagem
         r = min(w / self.nat[0], h / self.nat[1])
         if abs(r - 1) < 0.04:
             return
