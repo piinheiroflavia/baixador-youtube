@@ -6,7 +6,7 @@ name: Gerar programa para Windows
 on:
   push:
     branches: [main]
-    paths: ["Baixador_YouTube.pyw", "icone.ico", ".github/workflows/gerar-exe.yml"]
+    paths: ["Baixador_YouTube.pyw", "icone.ico", "icone.png", "logo_cliente.png", "logo_cliente_download.png", ".github/workflows/gerar-exe.yml"]
   workflow_dispatch:
   schedule:
     - cron: "0 9 * * 1"
@@ -25,7 +25,7 @@ jobs:
           python-version: "3.12"
 
       - name: Instalar dependências
-        run: pip install --upgrade pyinstaller "yt-dlp[default]" imageio-ffmpeg deno
+        run: pip install --upgrade pyinstaller "yt-dlp[default]" imageio-ffmpeg deno pillow
 
       - name: Gerar o .exe
         run: |
@@ -36,6 +36,9 @@ jobs:
             --name BaixadorYouTube `
             --icon icone.ico `
             --add-data "icone.ico;." `
+            --add-data "icone.png;." `
+            --add-data "logo_cliente.png;." `
+            --add-data "logo_cliente_download.png;." `
             --add-binary "$deno;." `
             --collect-all imageio_ffmpeg `
             --collect-all yt_dlp `
