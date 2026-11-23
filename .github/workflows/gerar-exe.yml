@@ -1,15 +1,15 @@
 name: Gerar programa para Windows
 
-# Roda quando o código muda, quando alguém clica em "Run workflow"
-# e toda segunda-feira (para pegar a versão mais nova do yt-dlp,
-# já que o YouTube muda com frequência).
+# Roda quando o código muda ou quando alguém clica em "Run workflow"
+# (Actions > Gerar programa para Windows > Run workflow). Use o botão se o
+# YouTube mudar e o download parar de funcionar: a nova versão já vem com o
+# yt-dlp mais recente. Não roda sozinho toda semana para não perder a
+# reputação do arquivo no SmartScreen do Windows.
 on:
   push:
     branches: [main]
     paths: ["Baixador_YouTube.pyw", "icone.ico", "icone.png", "logo_cliente.png", "logo_cliente_download.png", ".github/workflows/gerar-exe.yml"]
   workflow_dispatch:
-  schedule:
-    - cron: "0 9 * * 1"
 
 permissions:
   contents: write
@@ -27,6 +27,9 @@ jobs:
       - name: Instalar dependências
         run: pip install --upgrade pyinstaller "yt-dlp[default]" imageio-ffmpeg deno pillow pypac
 
+      - name: Gravar o número da versão
+        run: Set-Content -Path versao.txt -Value "${{ github.run_number }}" -Encoding ascii
+
       - name: Gerar o .exe
         run: |
           $deno = python -c "import deno; print(deno.find_deno_bin())"
@@ -39,6 +42,7 @@ jobs:
             --add-data "icone.png;." `
             --add-data "logo_cliente.png;." `
             --add-data "logo_cliente_download.png;." `
+            --add-data "versao.txt;." `
             --add-binary "$deno;." `
             --collect-all imageio_ffmpeg `
             --collect-all yt_dlp `
@@ -51,7 +55,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: baixador
-          name: Baixador do YouTube (versão mais recente)
+          name: Baixador do YouTube (versão ${{ github.run_number }})
           body: |
             Baixe o arquivo **BaixadorYouTube.exe** abaixo e dê dois cliques para abrir.
             Não precisa instalar nada.

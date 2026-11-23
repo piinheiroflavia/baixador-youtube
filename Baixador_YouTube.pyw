@@ -164,6 +164,35 @@ def erro_amigavel(e):
     return "Não foi possível baixar este vídeo. Feche o programa, abra de novo e tente mais uma vez."
 
 
+REPO = "piinheiroflavia/baixador-youtube"
+LINK_DOWNLOAD = f"https://github.com/{REPO}/releases/latest/download/BaixadorYouTube.exe"
+
+
+def versao_local():
+    p = recurso("versao.txt")
+    if not p:
+        return None
+    try:
+        return int(open(p, encoding="ascii").read().strip())
+    except Exception:
+        return None
+
+
+def versao_publicada():
+    """Número da última versão publicada no GitHub (ou None se não der para saber)."""
+    import json
+    import urllib.request
+    REDE["pronto"].wait(12)
+    pr = REDE["proxy"]
+    abridor = urllib.request.build_opener(urllib.request.ProxyHandler({"http": pr, "https": pr} if pr else {}))
+    req = urllib.request.Request(f"https://api.github.com/repos/{REPO}/releases/latest",
+                                 headers={"User-Agent": "BaixadorYouTube", "Accept": "application/vnd.github+json"})
+    with abridor.open(req, timeout=8) as r:
+        nome = json.load(r).get("name") or ""
+    m = re.search(r"vers[aã]o\s+(\d+)", nome, re.I)
+    return int(m.group(1)) if m else None
+
+
 def anotar(msg):
     """Escreve uma linha no arquivo de registro."""
     try:
@@ -649,6 +678,7 @@ class App:
         self.detalhes = e.get("detalhes", "")
         self.carregando_desde = e.get("carregando_desde")
         self.procurando_desde = None
+        self.nova_versao = e.get("nova_versao")
         self.imagens = {}
 
         root.title("Baixar vídeos Youtube")
@@ -681,6 +711,11 @@ class App:
             tk.Label(cab, image=self.imagens["logo"], bg=BRANCO).pack(side="left")
         tk.Label(cab, text="Baixar vídeos Youtube", font=fonte(16, True), bg=BRANCO, fg=TEXTO).pack(
             side="left", padx=(px(12), 0))
+        self.aviso_versao = Botao(cab, BRANCO, "Nova versão disponível — baixar", self.baixar_versao_nova,
+                                  cor=AZUL_CLARO, hover="#DCE6FD", cor_texto=AZUL, altura=36, largura=290,
+                                  raio=18, tam=13, icone=ic_download)
+        if self.nova_versao:
+            self.aviso_versao.pack(side="right")
         tk.Frame(janela, bg=BORDA, height=1).pack(fill="x")
 
         corpo = tk.Frame(janela, bg=BRANCO)
@@ -873,12 +908,18 @@ class App:
         return (self.janela.winfo_reqwidth(),
                 self.janela.winfo_reqheight() + self.rod_area.winfo_reqheight())
 
+    def baixar_versao_nova(self):
+        import webbrowser
+        webbrowser.open(LINK_DOWNLOAD)
+        self.mostrar_status("O download da versão nova começou no navegador. Quando terminar, feche este "
+                            "programa e abra o arquivo novo.")
+
     def estado(self):
         return {"fila": self.fila, "link": self.entrada.get().strip(), "tipo": self.tipo,
                 "qualidade": self.qualidade, "pasta": self.pasta, "info": self.info,
                 "miniatura_pil": self.miniatura_pil, "pedido_previa": self.pedido_previa,
                 "ultimo_arquivo": self.ultimo_arquivo, "detalhes": self.detalhes,
-                "carregando_desde": self.carregando_desde}
+                "carregando_desde": self.carregando_desde, "nova_versao": self.nova_versao}
 
     def tique(self):
         """Mostra o tempo passando, para a pessoa ver que o programa não travou."""
@@ -1190,7 +1231,11 @@ class App:
         try:
             while True:
                 tipo, valor = self.fila.get_nowait()
-                if tipo == "progresso":
+                if tipo == "nova_versao":
+                    self.nova_versao = valor
+                    if not self.aviso_versao.winfo_ismapped():
+                        self.aviso_versao.pack(side="right")
+                elif tipo == "progresso":
                     self.procurando_desde = None
                     self.botao.mudar(texto=f"Baixando… {valor:.0f}%", pct=valor)
                 elif tipo == "finalizando":
@@ -1332,6 +1377,18 @@ def main():
         except Exception:
             pass
 
+    def conferir_versao(ctrl):
+        local = versao_local()
+        if not local:
+            return
+        try:
+            remota = versao_publicada()
+            anotar(f"versão deste programa: {local}; versão publicada: {remota}")
+            if remota and remota > local and ctrl.app:
+                ctrl.app.fila.put(("nova_versao", remota))
+        except Exception as e:
+            anotar(f"não deu para conferir se há versão nova: {e}")
+
     def abrir_principal():
         ativar_dns_reserva()
         threading.Thread(target=descobrir_proxy, daemon=True).start()  # caminho da internet
@@ -1339,6 +1396,7 @@ def main():
         ctrl = Controle(raiz)
         ctrl.montar()
         ctrl.caber_na_tela()
+        threading.Thread(target=conferir_versao, args=(ctrl,), daemon=True).start()
 
     if getattr(sys, "frozen", False):  # .exe já vem com tudo dentro
         abrir_principal()
